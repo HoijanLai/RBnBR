@@ -1,1 +1,1 @@
-## pleas don't read me now
+## please don't read me now
