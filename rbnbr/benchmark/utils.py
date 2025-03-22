@@ -8,3 +8,4 @@ def evaluate_solution(solution, A):
         for j in range(i+1, n):
             value += A[i][j] * solution[i] * solution[j]
     return value
+
