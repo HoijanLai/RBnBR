@@ -36,9 +36,10 @@ from rbnbr.solver.quantum.branching_rules import branch_confidence, branch_harde
 @dataclass
 class QBB(QRRMaxCutSolver, ABC):
     _: KW_ONLY
-    random_pass: bool = False
+    random_pass: float = 0.0
     search_style: str = 'bfs' 
     gap: int = 0
+    bound_with_solver = True
     
     def solve(self, problem: MaxCutProblem, optim_params=None, qrr_information=None) -> Solution:
         optim_params = self._watch_optim_params(optim_params)
@@ -63,14 +64,21 @@ class QBB(QRRMaxCutSolver, ABC):
     
     def _main_loop(self, original_problem, optim_params, qrr_information):
         
+        gap = self.gap
+        avg_deg = original_problem.graph.number_of_edges() / original_problem.graph.number_of_nodes()
+        
+        problem_info = {
+            'avg_deg': avg_deg,
+        }
+        
         ###################
         #  INITIALIZATION 
         ###################
         ### because the search is exponential, we restrict the number of search
-        OP_MAX = original_problem.graph.number_of_nodes()
+        OP_MAX = 2* original_problem.graph.number_of_nodes()
         n_op = 0
         ### The best solution and the bound (should always be updated together)
-        cut_bound = 0
+        best_cut = 0
         best_sol = None
         
         ### The root node of the search tree
@@ -94,34 +102,48 @@ class QBB(QRRMaxCutSolver, ABC):
                 subp_uf, _ = todo.pop(0)
             n_op += 1
             
-            #####################################
-            #  Solve the subproblem 
-            #####################################
-            heuristic, bitstr, cut_val = self._solve_subproblem(subp_uf, original_problem, optim_params, qrr_information)
-           
-            ################################
-            #  Post-processing 
-            ################################
-            prune_flag = (cut_val < cut_bound - self.gap) and (random.random() < 0.5)
 
-            ### update the best solution is done differently then pruning
-            update_flag = (cut_val > cut_bound)
-            
-            ### update the best solution
-            if update_flag:
-                cut_bound = cut_val
-                best_sol = bitstr
-                my_solution.add_step(
+            subprob_materials = subp_uf.get_subproblem(original_problem)
+            if self.bound_with_solver:
+                #####################################
+                #  Solve the subproblem 
+                #####################################
+                heuristic, bitstr, cut_val = self.solve_subproblem(subp_uf, subprob_materials, original_problem, optim_params, qrr_information)
+                if cut_val > best_cut:
+                    best_cut = cut_val
+                    best_sol = bitstr
+                    my_solution.add_step(
                     solution=bitstr, 
                     cost=cut_val,
                     elapsed_time=0.0,
                     approx_ratio=original_problem.approx_ratio(bitstr),
                 )
+            
+                ################################
+                #  Bound with the solution 
+                ################################
+                gap = max(self.gap - subp_uf.depth * avg_deg, 0)
+                will_branch = (cut_val + gap >= best_cut) or (random.random() >= (1 - self.random_pass))
+            
+            else: # not using the solver to bound
+                bound = self.bound(subp_uf, subprob_materials, problem_info)
+                will_branch = bound > best_cut
+                if will_branch: # also means it is worth solving the subproblem
+                    heuristic, bitstr, cut_val = self.solve_subproblem(subp_uf, subprob_materials, original_problem, optim_params, qrr_information)
+                    if cut_val > best_cut:
+                        best_cut = cut_val
+                        best_sol = bitstr
+                        my_solution.add_step(
+                            solution=bitstr, 
+                            cost=cut_val,
+                            elapsed_time=0.0,
+                            approx_ratio=original_problem.approx_ratio(bitstr),
+                        )
 
             #########################################################
             # Schedule the subproblems with todo
             #########################################################
-            if prune_flag:
+            if not will_branch:
                 continue
             else:
                 u, v = self.pick_branching_pair(heuristic)
@@ -137,7 +159,7 @@ class QBB(QRRMaxCutSolver, ABC):
         # add the best step (because the last subproblem step is not necessarily the best)
         my_solution.add_step(
             solution=best_sol,
-            cost=cut_bound,
+            cost=best_cut,
             elapsed_time=0.0,
             approx_ratio=original_problem.approx_ratio(best_sol),
         )
@@ -149,7 +171,11 @@ class QBB(QRRMaxCutSolver, ABC):
         pass
     
     @abstractmethod
-    def _solve_subproblem(self, subp_uf, original_problem, optim_params, qrr_information):
+    def solve_subproblem(self, subp_uf, original_problem, optim_params, qrr_information):
+        pass
+    
+    @abstractmethod
+    def bound(self, subp_uf, problem_info):
         pass
 
 @dataclass
@@ -159,11 +185,18 @@ class Edge_QBB_MC(QBB):
     """
     _: KW_ONLY
     branching_strategy: str = "r1"
+    approx_style: str = 'default'
     def __post_init__(self):
         super().__post_init__() 
 
     
-    def _solve_subproblem(self, subp_uf, original_problem, optim_params, qrr_information):
+    def solve_subproblem(
+        self, 
+        subp_uf, 
+        subprob_materials, 
+        original_problem, 
+        optim_params, 
+        qrr_information):
         """
         Solves a subproblem in the branch and bound process.
         
@@ -180,7 +213,7 @@ class Edge_QBB_MC(QBB):
             cut_full: Objective value of the solution
         """
         # Get the subproblem materials (problem instance and mappings)
-        subprob_materials = subp_uf.get_subproblem(original_problem)
+        
         if subprob_materials is None:
             # Subproblem is infeasible
             return None, None, None, -1
@@ -200,10 +233,10 @@ class Edge_QBB_MC(QBB):
             # Otherwise, solve the subproblem with QRR
             if is_root_prob:
                 # For root problem, use provided optimization parameters
-                curr_sol, X = QRRMaxCutSolver.qrr(self, sub_p, optim_params)
+                curr_sol, X = QRRMaxCutSolver.qrr(self, sub_p, optim_params, approx_style=self.approx_style)
             else:
                 # For subproblems, use default parameters
-                curr_sol, X = QRRMaxCutSolver.qrr(self, sub_p)
+                curr_sol, X = QRRMaxCutSolver.qrr(self, sub_p, approx_style=self.approx_style)
                 
             # Convert the reduced solution to the original solution
             sol_full = subp_uf.get_original_solution(curr_sol, rep_to_qb)
@@ -234,10 +267,21 @@ class Edge_QBB_MC(QBB):
         u, v = qb_to_rep[qb_u], qb_to_rep[qb_v]
         
         return u, v
+    
+    def bound(self, subp_uf, subprob_materials, problem_info):
+        subp = subprob_materials[0]
+        L = nx.laplacian_matrix(subp.graph).toarray()
+        eigvals = np.linalg.eigvals(L)
+        b = 0.25 * np.max(eigvals) * subp.N
+        return b
          
 
 class BUF:
     # Union-Find structure 
+    @property
+    def depth(self):
+        return len(self.parent) - len(set(self.parent)) + 1
+    
     def __init__(self, n):
         self.parent = list(range(n))
         self.rank = [0]*n # 'depth' of its children
@@ -302,20 +346,7 @@ class BUF:
         
         
     def get_subproblem(self, root_problem):
-        """
-        Constructs a Max-Cut cost Hamiltonian for the reduced graph.
-        The reduction is based on the union-find structure.
-        
-        Assumes graph is a networkx.Graph with nodes labeled 0...n-1.
-        Edge weights are taken from the 'weight' attribute (default=1).
-        
-        The cost Hamiltonian for Max-Cut on the reduced graph is:
-            H = sum_{(i,j) in E_reduced} w_{ij}/2 * (I - Z_i Z_j)
-        where i,j index the reduced nodes (i.e., unique union-find groups).
-        
-        Returns:
-            A Qiskit operator (SummedOp) representing the Hamiltonian.
-        """
+
         graph = root_problem.graph
         assert graph.number_of_nodes() == len(self.parent), "Graph and UF structure must have the same number of nodes"
         # Step 1: Build the mapping from original node -> group representative.

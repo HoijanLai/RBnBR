@@ -23,6 +23,10 @@ class MaxCutProblem(CombProblemBase):
         return self.graph.number_of_edges()
     
     @property
+    def avg_deg(self):
+        return self.E / self.N
+    
+    @property
     def name(self):
         return self._metadata['name']
     

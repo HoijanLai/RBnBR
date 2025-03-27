@@ -35,13 +35,16 @@ def compute_Cij(J_ij: float, h_i: float, h_j: float, J_ik: np.ndarray, J_jk: np.
 
 
 
-def p1_Z_maxcut(graph, beta, gamma):
+def p1_Z_maxcut(graph, beta, gamma): 
+    """
+    not compatible with the graph with negative edges
+    """
     n_nodes = len(graph.nodes)
     Z = np.zeros((n_nodes, n_nodes))
     # Convert graph to adjacency matrix using NetworkX's built-in function
 
     J = nx.to_numpy_array(graph)
-    uw_J = np.where(J > 0, 1, 0)  # Create unweighted adjacency matrix
+    uw_J = np.where(J > 0, 1, 0)  # Create unweighted adjacency matrix 
     
     # For MaxCut, all h_i are 0
     h = np.zeros(n_nodes)
@@ -68,7 +71,7 @@ def p1_Z_maxcut(graph, beta, gamma):
 def p1_expval_maxcut(graph, beta, gamma):
     w = nx.to_numpy_array(graph)
     Z = p1_Z_maxcut(graph, beta, gamma)
-    return np.sum(Z * np.triu(w))
+    return np.sum(Z * w)
     
     
 

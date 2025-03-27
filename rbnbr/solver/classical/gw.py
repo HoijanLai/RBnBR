@@ -4,6 +4,7 @@ import cvxpy as cp
 from rbnbr.solver.solver_base import ApproximationSolver
 from rbnbr.problems.problem_base import CombProblemBase
 from rbnbr.solver.solution import Solution
+import networkx as nx
 
 
 class GWMaxcutSolver(ApproximationSolver):
@@ -13,10 +14,12 @@ class GWMaxcutSolver(ApproximationSolver):
         
     def solve(self, problem: CombProblemBase) -> List[int]:
         breadcrumbs = Solution()
-        adj_matrix = problem.adjacency_matrix
+        
+        L = np.array(0.25 * nx.laplacian_matrix(problem.graph).todense())
         
         # Extracted method call
-        X_val = GWMaxcutSolver.solve_sdp(adj_matrix)
+        L_u = GWMaxcutSolver.get_L_u(L)
+        X_val = GWMaxcutSolver.solve_sdp(L_u)
         
         # Step 2: Cholesky decomposition to get vectors
         vectors = GWMaxcutSolver.decompose_X(X_val)
@@ -34,46 +37,46 @@ class GWMaxcutSolver(ApproximationSolver):
         
         return breadcrumbs
 
-    @staticmethod
-    def solve_sdp(adj_matrix: np.ndarray) -> np.ndarray:
-        n = adj_matrix.shape[0]
-        X = cp.Variable((n, n), symmetric=True)
-        constraints = [X >> 0]  # PSD constraint
-        constraints += [cp.diag(X) == 1]  # Unit vectors constraint
-        
-        is_weighted = not np.all(np.logical_or(adj_matrix == 0, adj_matrix == 1))
-        
-        if is_weighted:
-            objective = cp.Maximize(0.25 * cp.sum(cp.multiply(adj_matrix, (1 - X))))
-        else:
-            objective = cp.Maximize(0.25 * cp.sum(cp.multiply((adj_matrix > 0).astype(float), (1 - X))))
-        
-        constraints[0] = X + 1e-6 * np.eye(n) >> 0
 
-        prob = cp.Problem(objective, constraints)
-        prob.solve(solver=cp.SCS)
+    @staticmethod
+    def get_L_u(L) -> np.ndarray:
+        N = L.shape[0]
+        u = cp.Variable(N)  # Correcting vector
+        L_u = L + cp.diag(u)  # D - W + diag(u)
+        t = cp.Variable()   # Variable bounding the largest eigenvalue
+
+        # Objective: Minimize the largest eigenvalue (minimize t)
+        objective = cp.Minimize(t)
         
-        if prob.status != cp.OPTIMAL:
-            print(f"Solver status: {prob.status}")
-            raise RuntimeError(f"SDP optimization failed with status {prob.status}")
+        # Constraints:
+        # (1) (N/4) * L_u << t * I  (i.e., largest eigenvalue of (N/4)L_u <= t)
+        # (2) Sum(u) = 0
+        constraints = [
+            (N/4) * L_u << t * np.eye(N),
+            cp.sum(u) == 0
+        ]
         
-        X_val = X.value
-        X_val = (X_val + X_val.T) / 2  # Ensure perfect symmetry
-        return X_val
+        # Solve the SDP
+        prob = cp.Problem(objective, constraints)   
+        prob.solve(solver=cp.CVXOPT)
+
+        return L+np.diag(u.value)
+
+    @staticmethod
+    def solve_sdp(L) -> np.ndarray:
+        psd_mat = cp.Variable(L.shape, PSD=True)
+        obj = cp.Maximize(cp.trace(L @ psd_mat))
+        constraints = [cp.diag(psd_mat) == 1]  
+        prob = cp.Problem(obj, constraints)
+        prob.solve(solver=cp.CVXOPT)
+
+        return psd_mat.value
     
     @staticmethod
     def decompose_X(X_val: np.ndarray) -> np.ndarray:
         reg = 1e-6
-        while True:
-            try:
-                L = np.linalg.cholesky(X_val + reg * np.eye(X_val.shape[0]))
-                break
-            except np.linalg.LinAlgError:
-                reg *= 10
-                if reg > 1e-3:  # Set a maximum regularization threshold
-                    raise RuntimeError("Failed to find valid Cholesky decomposition")
-                
-        vectors = L.T  # Each row is a vector
+        evals, evects = np.linalg.eigh(X_val)
+        vectors = evects.T[evals > reg].T
         return vectors
     
     

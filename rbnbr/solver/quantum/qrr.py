@@ -115,7 +115,7 @@ class QRRMaxCutSolver(QAOAMaxCutSolver):
     
 
     
-    def qrr(self, problem, optim_params=None, select_style='best'):
+    def qrr(self, problem, optim_params=None, select_style='best', approx_style='default'):
         ## 1. COMPUTE THE CORRELATION MATRIX
         if self.method == 'analytic':
             Z = self.get_corr_analytic(problem.graph, optim_params)
@@ -143,10 +143,10 @@ class QRRMaxCutSolver(QAOAMaxCutSolver):
                 sol = sign_vecs[i].astype(int).tolist()
                 cost = problem.evaluate_solution(sol)
                 candidates.append((cost, sol, evecs[i, :], evals[i], i))
+                # candidates.append((cost, sol, evecs[i, :], np.abs(evals[i]), i))
             
             # Sort in descending order by cost
             candidates.sort(reverse=True, key=lambda x: x[0])
-
             
             # self.cache_info = {
             #     'abs_rank': np.argsort(np.abs(evals)),
@@ -155,20 +155,44 @@ class QRRMaxCutSolver(QAOAMaxCutSolver):
             
             # Get the best solution and correlation matrix
             best_solution = candidates[0][1]
+            
+            
             if self.X_type == 'corr':
                 return best_solution, Z
+            
             elif self.X_type == 'relaxation':
+                
                 if self.topk is not None:
-                    k = max(candidates[0][4]+1, self.topk)
+                    k = max(candidates[0][4], self.topk)
                 else:
-                    k = candidates[0][4]+1
-                # k = candidates[0][4]
-                topk_items = candidates[:k]
-                topk_evs = np.array([x[2] for x in topk_items])
-                topk_evals = np.array([x[3] for x in topk_items])
-                X_k = topk_evs.T @ np.diag(topk_evals) @ topk_evs
+                    k = candidates[0][4] 
+                    
+                k += 1 # +1 because it will be used in slicing 
+
+                if approx_style == 'default':
+                    # the candidates are sorted by the cost
+                    # k is the eigen index of the best solution
+                    # so the following select the top k solutions
+                    # this is completely empirical 
+                    # and this is NOT low-rank approximation
+                    topk_items = candidates[:k]
+                    topk_evs = np.array([x[2] for x in topk_items])
+                    topk_evals = np.array([x[3] for x in topk_items])
+                    X_k = topk_evs.T @ np.diag(topk_evals) @ topk_evs
+                    
+                elif approx_style == 'low-rank':
+                    # low-rank approximation
+                    idx = np.argsort(evals)[::-1] 
+                    evals = evals[idx][:k]                 # sorted eigenvalues
+                    evecs = evecs[:, idx][:, :k]
+                    X_k = evecs @ np.diag(evals) @ evecs.T
+                
+                else:
+                    raise ValueError(f"Invalid approx_style: {approx_style}")
+                
                 return best_solution, X_k
-            else:
+            
+            else: # other X_type 
                 raise ValueError(f"Invalid X_type: {self.X_type}")
         
         elif select_style == 'eigenmax':
@@ -183,7 +207,7 @@ class QRRMaxCutSolver(QAOAMaxCutSolver):
             best_solution = sign_vecs[min_eigenvalue_index].astype(int).tolist()
             return best_solution, Z
                 
-        else:
+        else: # other select_style
             raise ValueError(f"Invalid select_style: {select_style}")
         
         
@@ -214,15 +238,14 @@ class QRRnGWMaxCutSolver(QRRMaxCutSolver, GWMaxCutSolver):
         qrr_information = self.wd_qrr_info(qrr_information)
         
         if not qrr_information:
-            cost_hamiltonian = QAOAMaxCutSolver._maxcut_Hc(problem.graph)
-            job, optim_params = QAOAMaxCutSolver._qsetup(self, cost_hamiltonian, *args, **kwargs)
-            X = QRRMaxCutSolver.get_corr_dev(job, problem.N, self.shots)
-
+            cut, Z = self.qrr(problem, *args, **kwargs)
         else:
-            cut, X = qrr_information
+            cut, Z = qrr_information
         
-        
-        X_val = GWMaxCutSolver.solve_sdp(X)
+        D = np.diag(np.sum(problem.adjacency_matrix, axis=1))
+        L = D - Z
+        L_u = GWMaxCutSolver.get_L_u(L)
+        X_val = GWMaxCutSolver.solve_sdp(L_u)
         vectors = GWMaxCutSolver.decompose_X(X_val)
         cut = GWMaxCutSolver.random_hyperplane(vectors)
         # collect results

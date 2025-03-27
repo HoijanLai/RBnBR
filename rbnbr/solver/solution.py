@@ -1,3 +1,4 @@
+import copy
 from typing import Callable
 
 import numpy as np
@@ -12,7 +13,9 @@ class Solution:
     @property
     def data(self):
         # get the last step as dictionary
-        return self._best_step
+        result = copy.deepcopy(self._best_step)
+        result['n_steps'] = len(self._breadcrumbs)
+        return result
     
     @property
     def cost(self):
@@ -70,6 +73,8 @@ class Solution:
             self._best_step['solution'] = step['solution']
             self._best_step['time'] = elapsed_time
             self._best_step['approx_ratio'] = approx_ratio
+            for k, v in kwargs.items():
+                self._best_step[k] = v
         
         
         return self

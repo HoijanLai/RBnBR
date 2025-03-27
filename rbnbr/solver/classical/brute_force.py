@@ -33,38 +33,35 @@ class BruteForceMaxCutSolver(ExactSolver):
         breadcrumbs = Solution()
         
         # Get problem data
-        graph = problem.graph
-        n = graph.number_of_nodes()
-        vertices = list(graph.nodes())
-        max_cut_value = 0
-        best_solution = np.zeros(n)  # Initialize with all 0s
-        
-        # Try all possible combinations of vertices for partition S
-        for size in range(1, n):
-            for S in combinations(vertices, size):
-                # Create 0/1 encoded solution
-                solution = np.zeros(n)
-                solution[list(S)] = 1
-                
-                # Calculate cut value for current partition
-                cut_value = sum(
-                    graph[u][v].get('weight', 1)
-                    for u in range(n)
-                    for v in range(n)
-                    if graph.has_edge(u, v) and solution[u] != solution[v]
-                )
-                
-                if cut_value > max_cut_value:
-                    max_cut_value = cut_value
-                    best_solution = solution
+        A = problem.adjacency_matrix
+        n = A.shape[0]
+        # Enumerate all possible 0/1 assignments (2^n assignments)
+        assignments = ((np.arange(1 << n)[:, None] & (1 << np.arange(n))) > 0).astype(int)  # shape (2^n, n)
+
+        # Compute all cut values simultaneously
+        # For each assignment, calculate the cut-value
+        diffs = np.abs(assignments[:, :, None] - assignments[:, None, :])  # shape (2^n, n, n)
+        cut_values = 0.5 * np.sum(diffs * A, axis=(1, 2))  # shape (2^n,)
+
+        # Find the best solution
+        best_idx = np.argmax(cut_values)
+        best_cut_value = cut_values[best_idx]
+        best_assignment = assignments[best_idx]
                     
         # Store solution in problem
         # Add breadcrumb
-        max_cut_value /= 2
         breadcrumbs.add_step(
-            solution=best_solution,
-            cost=max_cut_value,
+            solution=best_assignment,
+            cost=best_cut_value,
             elapsed_time=0  # Could add timing if needed
         )
         
         return breadcrumbs
+    
+    def solve_vectorize(self, problem):
+        self.sanity_check(problem)
+        
+        graph = problem.graph
+        adj_mat = graph.adjacency_matrix()
+        
+        

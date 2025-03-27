@@ -115,7 +115,7 @@ class ProblemSet:
             performance = problem.solutions(method_name).data
             performance['problem_name'] = problem.name
             data.append(performance)
-        return pd.DataFrame(data)[['problem_name', 'cost', 'approx_ratio']]
+        return pd.DataFrame(data)[['problem_name', 'cost', 'approx_ratio', 'n_steps']]
 
         
 
