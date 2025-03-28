@@ -24,7 +24,7 @@ from rbnbr.solver.quantum.qrr import QRRMaxCutSolver
 
 from collections import defaultdict
 
-
+import cvxpy as cp
 import numpy as np
 import networkx as nx
 
@@ -37,11 +37,11 @@ from rbnbr.solver.quantum.branching_rules import branch_confidence, branch_harde
 class QBB(QRRMaxCutSolver, ABC):
     _: KW_ONLY
     random_pass: float = 0.0
-    search_style: str = 'bfs' 
+    search_style: str = 'dfs' 
     gap: int = 0
-    bound_with_solver = True
+    bound_with_solver = False
     
-    def solve(self, problem: MaxCutProblem, optim_params=None, qrr_information=None) -> Solution:
+    def solve(self, problem: MaxCutProblem, optim_params=None, qrr_information=None, *, verbose=False) -> Solution:
         optim_params = self._watch_optim_params(optim_params)
         if qrr_information is not None:
             if self.X_type != qrr_information[2]:
@@ -51,7 +51,7 @@ class QBB(QRRMaxCutSolver, ABC):
             else:
                 qrr_information = copy.deepcopy(qrr_information)
 
-        bc = self._main_loop(problem, optim_params, qrr_information)
+        bc = self._main_loop(problem, optim_params, qrr_information, verbose)
         return bc
         
     def wd_qrr_info(self, qrr_information):
@@ -62,7 +62,7 @@ class QBB(QRRMaxCutSolver, ABC):
                 qrr_information = None
         return qrr_information
     
-    def _main_loop(self, original_problem, optim_params, qrr_information):
+    def _main_loop(self, original_problem, optim_params, qrr_information, verbose=False):
         
         gap = self.gap
         avg_deg = original_problem.graph.number_of_edges() / original_problem.graph.number_of_nodes()
@@ -75,7 +75,7 @@ class QBB(QRRMaxCutSolver, ABC):
         #  INITIALIZATION 
         ###################
         ### because the search is exponential, we restrict the number of search
-        OP_MAX = 2* original_problem.graph.number_of_nodes()
+        OP_MAX = 3 * original_problem.graph.number_of_nodes()
         n_op = 0
         ### The best solution and the bound (should always be updated together)
         best_cut = 0
@@ -85,7 +85,7 @@ class QBB(QRRMaxCutSolver, ABC):
         root_uf = BUF(original_problem.N)
         
         ### This todo list is either a queue or a stack, depending on the search style
-        todo = [(root_uf, {})]  # (UF structure, unassigned edges, partial cut value, partial constraints)
+        todo = [(root_uf, None)]  # (UF structure, unassigned edges, partial cut value, partial constraints)
         
         ### This is a container for storing the subproblem history
         my_solution = Solution()
@@ -96,65 +96,59 @@ class QBB(QRRMaxCutSolver, ABC):
         ############################
         while todo and n_op < OP_MAX:
             ### Get the next subproblem depending on the search style
-            if self.search_style == 'bfs':
-                subp_uf, _ = todo.pop()
-            elif self.search_style == 'dfs':
-                subp_uf, _ = todo.pop(0)
+            if self.search_style == 'dfs':
+                subp_uf, parent_problem = todo.pop()
+            elif self.search_style == 'bfs':
+                subp_uf, parent_problem = todo.pop(0)
             n_op += 1
             
 
-            subprob_materials = subp_uf.get_subproblem(original_problem)
-            if self.bound_with_solver:
-                #####################################
-                #  Solve the subproblem 
-                #####################################
-                heuristic, bitstr, cut_val = self.solve_subproblem(subp_uf, subprob_materials, original_problem, optim_params, qrr_information)
+            sub_p, qb_to_rep = subp_uf.get_subproblem(parent_problem)
+
+            bound = self.bound(subp_uf, sub_p, problem_info)
+            if verbose:
+                print(f"Bound: {bound}")
+            
+            if sub_p is None:
+                sub_p = original_problem
+            
+            will_branch = bound > best_cut
+
+            if will_branch: # also means it is worth solving the subproblem
+                heuristic, bitstr, cut_val = \
+                    self.solve_subproblem(
+                        subp_uf, 
+                        sub_p, 
+                        qb_to_rep,
+                        original_problem, 
+                        optim_params=optim_params, 
+                        qrr_information=qrr_information)
+                    
                 if cut_val > best_cut:
+                    if verbose:
+                        print(f"Found a better solution: {cut_val}")
                     best_cut = cut_val
                     best_sol = bitstr
+                    
                     my_solution.add_step(
-                    solution=bitstr, 
-                    cost=cut_val,
-                    elapsed_time=0.0,
-                    approx_ratio=original_problem.approx_ratio(bitstr),
-                )
-            
-                ################################
-                #  Bound with the solution 
-                ################################
-                gap = max(self.gap - subp_uf.depth * avg_deg, 0)
-                will_branch = (cut_val + gap >= best_cut) or (random.random() >= (1 - self.random_pass))
-            
-            else: # not using the solver to bound
-                bound = self.bound(subp_uf, subprob_materials, problem_info)
-                will_branch = bound > best_cut
-                if will_branch: # also means it is worth solving the subproblem
-                    heuristic, bitstr, cut_val = self.solve_subproblem(subp_uf, subprob_materials, original_problem, optim_params, qrr_information)
-                    if cut_val > best_cut:
-                        best_cut = cut_val
-                        best_sol = bitstr
-                        my_solution.add_step(
-                            solution=bitstr, 
-                            cost=cut_val,
-                            elapsed_time=0.0,
-                            approx_ratio=original_problem.approx_ratio(bitstr),
-                        )
-
-            #########################################################
-            # Schedule the subproblems with todo
-            #########################################################
-            if not will_branch:
-                continue
-            else:
+                        solution=bitstr, 
+                        cost=cut_val,
+                        elapsed_time=0.0,
+                        approx_ratio=original_problem.approx_ratio(bitstr),
+                    )
+                    
                 u, v = self.pick_branching_pair(heuristic)
+                if verbose:
+                    print(f"Branching on {u} and {v}")
                 
                 uf_same = BUF.clone(subp_uf)  
-                if uf_same.union(u, v, 0):
-                    todo.append((uf_same, {}))
-
                 uf_diff = BUF.clone(subp_uf)
-                if uf_diff.union(u, v, 1):
-                    todo.append((uf_diff, {}))
+                if uf_same.union(u, v, 0) and uf_diff.union(u, v, 1):
+                    todo.append((uf_same, sub_p))
+                    todo.append((uf_diff, sub_p))
+                
+                    
+                    
         
         # add the best step (because the last subproblem step is not necessarily the best)
         my_solution.add_step(
@@ -193,10 +187,12 @@ class Edge_QBB_MC(QBB):
     def solve_subproblem(
         self, 
         subp_uf, 
-        subprob_materials, 
-        original_problem, 
-        optim_params, 
-        qrr_information):
+        sub_p, # subproblem 
+        qb_to_rep, # mapping the node in sub_p to its qubit index
+        original_problem, # original problem for evaluating the solution
+        *,
+        optim_params=None, 
+        qrr_information=None):
         """
         Solves a subproblem in the branch and bound process.
         
@@ -214,14 +210,12 @@ class Edge_QBB_MC(QBB):
         """
         # Get the subproblem materials (problem instance and mappings)
         
-        if subprob_materials is None:
+        if sub_p is None:
             # Subproblem is infeasible
-            return None, None, None, -1
-        
-        sub_p, qb_to_rep, rep_to_qb = subprob_materials
+            return None, None, -1
     
         # Check if this is the root problem (no variables fixed yet)
-        is_root_prob = (sub_p.N == original_problem.N)
+        is_root_prob = sub_p is None
         
         if qrr_information is not None and is_root_prob:
             # If we have pre-computed QRR information for the root problem, use it
@@ -233,13 +227,13 @@ class Edge_QBB_MC(QBB):
             # Otherwise, solve the subproblem with QRR
             if is_root_prob:
                 # For root problem, use provided optimization parameters
-                curr_sol, X = QRRMaxCutSolver.qrr(self, sub_p, optim_params, approx_style=self.approx_style)
+                curr_sol, X = QRRMaxCutSolver.qrr(self, original_problem, optim_params, approx_style=self.approx_style)
             else:
                 # For subproblems, use default parameters
                 curr_sol, X = QRRMaxCutSolver.qrr(self, sub_p, approx_style=self.approx_style)
                 
             # Convert the reduced solution to the original solution
-            sol_full = subp_uf.get_original_solution(curr_sol, rep_to_qb)
+            sol_full = subp_uf.get_original_solution(curr_sol, qb_to_rep)
             cut_full = original_problem.evaluate_solution(sol_full)
             
         heuristic = {
@@ -268,16 +262,48 @@ class Edge_QBB_MC(QBB):
         
         return u, v
     
-    def bound(self, subp_uf, subprob_materials, problem_info):
-        subp = subprob_materials[0]
-        L = nx.laplacian_matrix(subp.graph).toarray()
-        eigvals = np.linalg.eigvals(L)
-        b = 0.25 * np.max(eigvals) * subp.N
-        return b
+    def bound(self, subp_uf, sub_p, problem_info):
+        if sub_p is None:
+            return np.inf
+
+        n = sub_p.graph.number_of_nodes()
+        
+        u = cp.Variable(n)
+        t = cp.Variable()  # This will represent our bound
+        
+        L = nx.laplacian_matrix(sub_p.graph).toarray()
+        M = (n/4) * (L + cp.diag(u)) + cp.diag(u)
+        
+        constraints = [
+            cp.sum(u) == 0,
+            M << t * np.eye(n)
+        ]
+        
+        prob = cp.Problem(cp.Minimize(t), constraints)
+        
+        try:
+            prob.solve()
+            
+            u_opt = u.value
+            M_opt = (n/4) * (L + np.diag(u_opt))
+            
+            # Compute largest eigenvector
+            evals = np.linalg.eigvals(M_opt)
+            return np.max(evals)
+            
+        except Exception as e:
+            # Fall back to simple eigenvalue bound if optimization fails
+            L = nx.laplacian_matrix(sub_p.graph).toarray()
+            eigvals = np.linalg.eigvals(L)
+            return 0.25 * np.max(eigvals) * sub_p.N
          
 
 class BUF:
     # Union-Find structure 
+    @property
+    def n_var(self):
+        return len(self.parent)
+    
     @property
     def depth(self):
         return len(self.parent) - len(set(self.parent)) + 1
@@ -345,24 +371,26 @@ class BUF:
         
         
         
-    def get_subproblem(self, root_problem):
-
-        graph = root_problem.graph
-        assert graph.number_of_nodes() == len(self.parent), "Graph and UF structure must have the same number of nodes"
-        # Step 1: Build the mapping from original node -> group representative.
-
-
-        # Step 2: Determine the unique groups and create a reduced graph.
-        reduced_nodes = set(self.parent)
-        qb_to_rep = sorted(list(reduced_nodes))
-        rep_to_qb = {rep: idx for idx, rep in enumerate(qb_to_rep)}
+    def get_subproblem(self, parent_problem):
+        if parent_problem is None:
+            # no parent problem, nothing to do
+            return None, list(range(self.n_var))
         
-        if len(reduced_nodes) == graph.number_of_nodes():
-            return root_problem, qb_to_rep, rep_to_qb
-        
-        else:
+        else: 
+            graph = parent_problem.graph
+            reduced_nodes = set(self.parent)
+            qb_to_rep = sorted(list(reduced_nodes))
+            # print(f"Depth: {self.depth}")
+            # Step 1: Build the mapping from original node -> group representative.
+
+
+            # Step 2: Determine the unique groups and create a reduced graph.
+            reduced_nodes = set(self.parent)
+            qb_to_rep = sorted(list(reduced_nodes))
+            
+            
             reduced_graph = nx.Graph()
-            for site in qb_to_rep:
+            for site in qb_to_rep: # qubit is from 0 to n-1
                 reduced_graph.add_node(site)
             
             # For each edge in the original graph, add an edge between groups (if not same)
@@ -374,11 +402,11 @@ class BUF:
                     continue
                 else:
                     total_flip = 1 - 2 * (self.offset[u] ^ self.offset[v]) 
-                    dw = data.get('weight', 1) * total_flip
+                    new_w = data.get('weight', 1) * total_flip
                     if reduced_graph.has_edge(rep_u, rep_v):
-                        reduced_graph[rep_u][rep_v]['weight'] += dw
+                        reduced_graph[rep_u][rep_v]['weight'] += new_w
                     else:
-                        reduced_graph.add_edge(rep_u, rep_v, weight=dw)
+                        reduced_graph.add_edge(rep_u, rep_v, weight=new_w)
                         
             # We will index the reduced nodes in some fixed order.
             if reduced_graph.number_of_edges() == 0:
@@ -386,10 +414,11 @@ class BUF:
             
         
             mc_subproblem = MaxCutProblem(reduced_graph, solve=False)
-            return mc_subproblem, qb_to_rep, rep_to_qb
+            return mc_subproblem, qb_to_rep
     
     
-    def get_original_solution(self, reduced_solution, rep_to_qb):
+    def get_original_solution(self, reduced_solution, qb_to_rep):
+        rep_to_qb = {rep: idx for idx, rep in enumerate(qb_to_rep)}
         sol = np.array([0] * len(self.parent))
         
         for node in range(len(self.parent)):
