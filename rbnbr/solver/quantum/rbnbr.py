@@ -64,7 +64,6 @@ class QBB(QRRMaxCutSolver, ABC):
     
     def _main_loop(self, original_problem, optim_params, qrr_information, verbose=False):
         
-        gap = self.gap
         avg_deg = original_problem.graph.number_of_edges() / original_problem.graph.number_of_nodes()
         
         problem_info = {
@@ -75,7 +74,7 @@ class QBB(QRRMaxCutSolver, ABC):
         #  INITIALIZATION 
         ###################
         ### because the search is exponential, we restrict the number of search
-        OP_MAX = 3 * original_problem.graph.number_of_nodes()
+        OP_MAX = 2 * original_problem.graph.number_of_nodes()
         n_op = 0
         ### The best solution and the bound (should always be updated together)
         best_cut = 0
@@ -134,6 +133,7 @@ class QBB(QRRMaxCutSolver, ABC):
                         solution=bitstr, 
                         cost=cut_val,
                         elapsed_time=0.0,
+                        steps_taken = n_op,
                         approx_ratio=original_problem.approx_ratio(bitstr),
                     )
                     
@@ -155,6 +155,7 @@ class QBB(QRRMaxCutSolver, ABC):
             solution=best_sol,
             cost=best_cut,
             elapsed_time=0.0,
+            steps_taken = 0,
             approx_ratio=original_problem.approx_ratio(best_sol),
         )
             
