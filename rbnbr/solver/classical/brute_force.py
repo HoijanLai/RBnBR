@@ -1,10 +1,6 @@
-from itertools import combinations
-import networkx as nx
-from typing import Tuple, List
 
 import numpy as np
 
-from rbnbr.problems.problem_base import CombProblemBase
 from rbnbr.solver.solver_base import ExactSolver
 from rbnbr.solver.solution import Solution
 
@@ -20,17 +16,30 @@ class BruteForceMaxCutSolver(ExactSolver):
     def set_N_limit(self, N_limit: int):
         pass
     
-    def sanity_check(
-        self, 
-        problem: CombProblemBase):
+    def sanity_check(self, problem):
         if problem.graph.number_of_nodes() > self.max_N:
             raise ValueError(f"Number of nodes in problem is greater than the maximum number of nodes allowed: {problem.graph.number_of_nodes()} > {self.max_N}")
         
         
     def solve(self, problem):
+        
+        best_assignment, best_cut_value = self._solve(problem)
+        # Store solution in problem
+        # Add breadcrumb
+        breadcrumbs = Solution()
+        breadcrumbs.add_step(
+            solution=best_assignment[0],
+            cost=best_cut_value[0],
+            elapsed_time=0  # Could add timing if needed
+        )
+        
+        return breadcrumbs
+
+
+    def _solve(self, problem):
         self.sanity_check(problem)
         
-        breadcrumbs = Solution()
+ 
         
         # Get problem data
         A = problem.adjacency_matrix
@@ -45,23 +54,9 @@ class BruteForceMaxCutSolver(ExactSolver):
 
         # Find the best solution
         best_idx = np.argmax(cut_values)
-        best_cut_value = cut_values[best_idx]
-        best_assignment = assignments[best_idx]
-                    
-        # Store solution in problem
-        # Add breadcrumb
-        breadcrumbs.add_step(
-            solution=best_assignment,
-            cost=best_cut_value,
-            elapsed_time=0  # Could add timing if needed
-        )
+        all_best_idx = np.where(cut_values == cut_values[best_idx])[0]
+        best_cut_value = cut_values[all_best_idx]
+        best_assignment = assignments[all_best_idx]
         
-        return breadcrumbs
-    
-    def solve_vectorize(self, problem):
-        self.sanity_check(problem)
-        
-        graph = problem.graph
-        adj_mat = graph.adjacency_matrix()
-        
-        
+        return best_assignment, best_cut_value
+             

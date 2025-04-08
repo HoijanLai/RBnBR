@@ -13,8 +13,9 @@ class Solution:
     @property
     def data(self):
         # get the last step as dictionary
+        self._best_step['first_seen'] = self.first_sight_optimal()
+        self._best_step['total_steps'] = self.total_step()
         result = copy.deepcopy(self._best_step)
-        result['n_steps'] = len(self._breadcrumbs)
         return result
     
     @property
@@ -22,7 +23,7 @@ class Solution:
         return self._best_step['cost']
     
     @property
-    def solution(self):
+    def z(self):
         return self._best_step['solution']
     
     @property
@@ -47,7 +48,9 @@ class Solution:
             'cost': None,
             'solution': None,
             'time': None,
-            'approx_ratio': None
+            'approx_ratio': None,
+            'n_steps': None,
+            'first_seen': None
         }
         
         
@@ -60,7 +63,7 @@ class Solution:
         **kwargs
     ):
         step = self._step_template.copy()
-        step['solution'] = self._convert_solution(solution)
+        step['solution'] = solution
         step['cost'] = cost
         step['time'] = elapsed_time
         step['approx_ratio'] = approx_ratio
@@ -68,7 +71,7 @@ class Solution:
             step[k] = v
         self._breadcrumbs.append(step)
         
-        if self._best_step['cost'] is None or cost > self._best_step['cost']:
+        if self._best_step['cost'] is None or cost >= self._best_step['cost']:
             self._best_step['cost'] = cost
             self._best_step['solution'] = step['solution']
             self._best_step['time'] = elapsed_time
@@ -78,6 +81,21 @@ class Solution:
         
         
         return self
+    
+    def total_step(self):  
+        n_step = 0
+        for step in self._breadcrumbs:
+            if 'n_steps' in step and step['n_steps'] > n_step:
+                n_step = step['n_steps']
+        return n_step
+    
+    def first_sight_optimal(self):
+        n_step = np.inf
+        for step in self._breadcrumbs:
+            if 'n_steps' in step:
+                if step['cost'] == self._best_step['cost'] and step['n_steps'] < n_step:
+                    n_step = step['n_steps']
+        return n_step
         
     
     def __getitem__(self, index):
@@ -85,7 +103,7 @@ class Solution:
     
     
     def __str__(self):
-        return f"Solution: {self._bitstring(self.solution)} \nSolution Value: {self.cost} \nApproximation Ratio: {self.approx_ratio}"
+        return f"Solution: {self._bitstring(self.z)} \nSolution Value: {self.cost} \nApproximation Ratio: {self.approx_ratio}"
     
     def __len__(self):
         return len(self._breadcrumbs)

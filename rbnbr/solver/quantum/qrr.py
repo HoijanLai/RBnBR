@@ -1,19 +1,15 @@
 import copy
 from dataclasses import dataclass, KW_ONLY
 import logging
-import sys
-import warnings
 import numpy as np
-from rbnbr.problems.max_cut import MaxCutProblem
 from rbnbr.solver.quantum.exp_p1 import p1_Z_maxcut
 from rbnbr.solver.quantum.qaoa import QAOAMaxCutSolver 
 from rbnbr.solver.solution import Solution
-from qiskit_algorithms.optimizers import OptimizerResult
 
 
 from qiskit.quantum_info import SparsePauliOp
     
-from rbnbr.solver.classical.gw import GWMaxcutSolver as GWMaxCutSolver
+from rbnbr.solver.classical import GWMaxcutSolver as GWMaxCutSolver
 
 
 @dataclass
@@ -23,17 +19,23 @@ class QRRMaxCutSolver(QAOAMaxCutSolver):
     method: str = 'analytic' # 'sampler' and 'analytic' are also available
     X_type: str = 'corr'
     
+    def __post_init__(self, *args, **kwargs):
+        super().__post_init__(*args, **kwargs)
+    
     def solve(
         self, 
-        problem: MaxCutProblem,
+        problem,
         optim_params=None, 
-        select_style='best' # or 'eigenmax' or 'eigenmin'
+        select_style='best', # or 'eigenmax' or 'eigenmin'
+        index_map=None,
+        **kwargs
         ):
+        if index_map is None:
+            index_map = {node: i for i, node in enumerate(problem.graph.nodes)}
         
-        optim_params = self._watch_optim_params(optim_params)
+        optim_params = self._check_optim_params(optim_params)
         
-        
-        best_bitstring, X = self.qrr(problem, optim_params, select_style)
+        best_bitstring, X = self.qrr(problem, optim_params, select_style, index_map)
         
         best_cost = problem.evaluate_solution(best_bitstring)
         breadcrumbs = Solution()
@@ -50,7 +52,7 @@ class QRRMaxCutSolver(QAOAMaxCutSolver):
 
 
     @staticmethod
-    def _get_corr_obs(n_nodes):
+    def _corr_observables(n_nodes):
         idx_list = []
         observables = []
         for i in range(n_nodes):
@@ -61,19 +63,19 @@ class QRRMaxCutSolver(QAOAMaxCutSolver):
         return idx_list, observables
     
     
-    def get_corr_estimator(self, optim_cc):
+    def _corr_estim(self, optim_cc):
         n_qubits = optim_cc.num_qubits
-        idx_list, observables = QRRMaxCutSolver._get_corr_obs(n_qubits)
+        idx_list, observables = QRRMaxCutSolver._corr_observables(n_qubits)
         results = self._expval(optim_cc, observables)
         
         Z = np.zeros((n_qubits, n_qubits))
         for (i, j), value in zip(idx_list, results):
             Z[i, j] = value
             Z[j, i] = value
-        return Z
+        return Z[::-1, ::-1]
     
     
-    def get_corr_sampler(self, optim_cc):
+    def _corr_sampler(self, optim_cc):
         
         n_qubits = optim_cc.num_qubits
         meas_result = self._measure(optim_cc)
@@ -104,23 +106,35 @@ class QRRMaxCutSolver(QAOAMaxCutSolver):
     
     def get_corr_dev(self, optim_cc, method='estimator'):
         if method == 'estimator':
-            Z = self.get_corr_estimator(optim_cc)
+            Z = self._corr_estim(optim_cc)
         elif method == 'sampler':
-            Z = self.get_corr_sampler(optim_cc)
+            Z = self._corr_sampler(optim_cc)
 
         else:
             raise ValueError(f"Invalid method: {method}")
         
         return Z
     
-
     
-    def qrr(self, problem, optim_params=None, select_style='best', approx_style='default'):
+    def qrr(
+        self, 
+        problem, 
+        optim_params=None, 
+        select_style='best', 
+        approx_style='default',
+        return_max_eval=False,
+        return_info=False,
+        index_map=None,
+        **kwargs
+        ):
+        if index_map is None:
+            index_map = {node: i for i, node in enumerate(problem.graph.nodes)}
+        
         ## 1. COMPUTE THE CORRELATION MATRIX
         if self.method == 'analytic':
             Z = self.get_corr_analytic(problem.graph, optim_params)
         else: 
-            optim_cc, optim_params = super().optim_circuit(problem.graph, optim_params)
+            optim_cc, optim_params = super().optim_circuit(problem.graph, optim_params, index_map)
             try:
                 Z = self.get_corr_dev(optim_cc, self.method)
             except Exception as e:
@@ -133,7 +147,7 @@ class QRRMaxCutSolver(QAOAMaxCutSolver):
         evecs = evecs.T
         sign_vecs = (1 + np.sign(evecs)) // 2 # 0 / 1 solution
         
-        
+        max_eval = np.max(evals)
         
         ## 3. SELECT THE BEST SOLUTION
         if select_style == 'best':
@@ -142,12 +156,13 @@ class QRRMaxCutSolver(QAOAMaxCutSolver):
             for i in range(sign_vecs.shape[0]):
                 sol = sign_vecs[i].astype(int).tolist()
                 cost = problem.evaluate_solution(sol)
-                candidates.append((cost, sol, evecs[i, :], evals[i], i))
+                relaxed_cost = problem.evaluate_solution(evecs[i, :], relaxed=True)
+                candidates.append((cost, sol, evecs[i, :], evals[i], i, relaxed_cost))
                 # candidates.append((cost, sol, evecs[i, :], np.abs(evals[i]), i))
             
             # Sort in descending order by cost
             candidates.sort(reverse=True, key=lambda x: x[0])
-            
+            # relaxed_candidates = sorted(candidates, key=lambda x: x[5], reverse=True)
             # self.cache_info = {
             #     'abs_rank': np.argsort(np.abs(evals)),
             #     'quality_rank': [x[4] for x in candidates]
@@ -155,10 +170,11 @@ class QRRMaxCutSolver(QAOAMaxCutSolver):
             
             # Get the best solution and correlation matrix
             best_solution = candidates[0][1]
-            
-            
+            # best_relaxed_solution = relaxed_candidates[0][3]
+            # best_relaxed_cost = relaxed_candidates[0][5]
+            solution_tuple = (None, None)
             if self.X_type == 'corr':
-                return best_solution, Z
+                solution_tuple = (best_solution, Z)
             
             elif self.X_type == 'relaxation':
                 
@@ -190,7 +206,7 @@ class QRRMaxCutSolver(QAOAMaxCutSolver):
                 else:
                     raise ValueError(f"Invalid approx_style: {approx_style}")
                 
-                return best_solution, X_k
+                solution_tuple = (best_solution, X_k)
             
             else: # other X_type 
                 raise ValueError(f"Invalid X_type: {self.X_type}")
@@ -199,28 +215,28 @@ class QRRMaxCutSolver(QAOAMaxCutSolver):
             # select the sign round solution with the largest absolute eigenvalue
             max_eigenvalue_index = np.argmax(np.abs(evals))
             best_solution = sign_vecs[max_eigenvalue_index].astype(int).tolist()
-            return best_solution, Z
+            solution_tuple = (best_solution, Z)
         
         elif select_style == 'eigenmin':
             # select the sign round solution with the smallest absolute eigenvalue
             min_eigenvalue_index = np.argmin(np.abs(evals))
             best_solution = sign_vecs[min_eigenvalue_index].astype(int).tolist()
-            return best_solution, Z
+            solution_tuple = (best_solution, Z)
                 
         else: # other select_style
             raise ValueError(f"Invalid select_style: {select_style}")
         
         
         
-    def _watch_optim_params(self, optim_params):
-        if optim_params is not None:
-            if len(optim_params) // 2 != self.reps:
-                msg = f"Ignored: The specified optim_params has reps = {len(optim_params) // 2}, but the current QRR solver has reps = {self.reps}"
-                logging.warning(msg)
-                optim_params = None
-            else:
-                optim_params = copy.deepcopy(optim_params)
-        return optim_params
+        if return_info:
+            return solution_tuple[0], solution_tuple[1], {
+                'max_eval': max_eval,
+                # 'max_relaxed_solution': best_relaxed_solution,
+                # 'max_relaxed_cost': best_relaxed_cost
+            }
+        else:
+            return solution_tuple
+
     
     
     
@@ -233,9 +249,9 @@ class QRRnGWMaxCutSolver(QRRMaxCutSolver, GWMaxCutSolver):
     def __init__(self, *args, **kwargs):
         QRRMaxCutSolver.__init__(self, *args, **kwargs)
         
-    def solve(self, problem: MaxCutProblem, qrr_information=None, *args, **kwargs):
+    def solve(self, problem, qrr_information=None, *args, **kwargs):
         # RUN QRR
-        qrr_information = self.wd_qrr_info(qrr_information)
+        qrr_information = self._check_qrr_info(qrr_information)
         
         if not qrr_information:
             cut, Z = self.qrr(problem, *args, **kwargs)
@@ -259,7 +275,7 @@ class QRRnGWMaxCutSolver(QRRMaxCutSolver, GWMaxCutSolver):
         
         return bc
         
-    def wd_qrr_info(self, qrr_information):
+    def _check_qrr_info(self, qrr_information):
         if qrr_information is not None:
             if self.X_type != qrr_information[2]:
                 msg = f"Ignored: The specified QRR information has X_type {qrr_information[2]}, but the current QRR solver has X_type {self.X_type}"
