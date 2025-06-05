@@ -1,4 +1,0 @@
-10     ................ brute_force_threshold : threshold of No. nodes to start brute-force search
-0.0  ................ edge_noise            : edge noise
-5      ................ nb_div                : No. mesh for grid search
-3      ................ div_level             : mesh refinement level
