@@ -90,7 +90,7 @@ class GW_BnB_MC(BnB, GWMaxcutSolver):
 
         return pairs
     
-    def get_bound(self, _, problem, laplacian, compensation,**k):
+    def get_bound(self, _, problem, laplacian, compensation, **k):
         if random.random() < self.random_pass:
             return np.inf, {}
         
@@ -109,7 +109,7 @@ class GW_BnB_MC(BnB, GWMaxcutSolver):
             u = cp.Variable(n)
             t = cp.Variable()  # This will represent our bound
             
-            M = (n/4) * (L + cp.diag(u)) + cp.diag(u)
+            M = (n/4) * (L + cp.diag(u))
         
             constraints = [
                 cp.sum(u) == 0,

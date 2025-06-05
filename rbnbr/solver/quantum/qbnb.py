@@ -1,7 +1,9 @@
 from dataclasses import InitVar, dataclass, KW_ONLY, field
 import logging
 import random
+from rbnbr.solver.quantum.qaoa import QAOAMaxCutSolver
 from rbnbr.solver.quantum.qrr import QRRMaxCutSolver
+from rbnbr.solver.quantum.qrr import qrr_on_laplacian
 from rbnbr.solver.BnB.bnb import BnB
 from rbnbr.solver.BnB.branching_rules import branch_hardest, branch_confidence, branch_easiest
 
@@ -15,7 +17,7 @@ import cvxpy as cp
 
 from queue import PriorityQueue
 
-
+    
 
 @dataclass
 class QRR_BnB_MC(BnB, QRRMaxCutSolver):
@@ -107,7 +109,7 @@ class QRR_BnB_MC(BnB, QRRMaxCutSolver):
 
         return pairs
     
-    def get_bound(self, _, problem, laplacian, compensation,**k):
+    def get_bound(self, _, problem, laplacian, compensation, **k):
         if random.random() < self.random_pass:
             return np.inf, {}
         
@@ -129,7 +131,7 @@ class QRR_BnB_MC(BnB, QRRMaxCutSolver):
             M = (n/4) * (L + cp.diag(u)) + cp.diag(u)
         
             constraints = [
-                cp.sum(u) == 0,
+                cp.sum(u) >= 0,
                 M << t * np.eye(n)
             ]
             
@@ -189,8 +191,9 @@ class QRR_BnB_MC_V2(QRR_BnB_MC):
         self.cache_avg_deg = avg_deg
         return basic_info
     
-    def get_bound(self, sub_uf, problem, **other_info):
+    def get_bound(self, sub_uf, problem, compensation, **other_info):
         # Check if this is the root problem (no variables fixed yet)
+        z_sub = None
         if self.qrr_info is not None and sub_uf.is_root:
             # If we have pre-computed QRR information for the root problem, use it
             z, X, _ = self.qrr_info
@@ -214,21 +217,22 @@ class QRR_BnB_MC_V2(QRR_BnB_MC):
             z = sub_uf.get_original_solution(z_sub)
             
         cut = self.cache_root_problem.evaluate_solution(z)
+
         bound_info = {
             'X': X, 
             'z': z,
             'cut': cut
         }
         
+        bound = cut / 0.85 + compensation
+        # ### BOUND WITH SOLUTION 
+        # if self.constant_gap is not None:
+        #     gap = self.constant_gap
+        # else:
+        #     gap = self.gap_scale / (sub_uf.n_var - sub_uf.n_rep) * self.cache_avg_deg
+        # free2go = (random.random() < self.random_pass) 
         
-        ### BOUND WITH SOLUTION 
-        if self.constant_gap is not None:
-            gap = self.constant_gap
-        else:
-            gap = self.gap_scale / (sub_uf.n_var - sub_uf.n_rep) * self.cache_avg_deg
-        free2go = (random.random() < self.random_pass) 
-        
-        bound = np.inf if free2go else cut + gap
+        # bound = np.inf if free2go else cut + gap
         
         return bound, bound_info
     
@@ -249,54 +253,95 @@ class QRR_BnB_MC_V2(QRR_BnB_MC):
         
         return z, {}
     
-    
-    
-@dataclass
-class QRR_BnB_MC_Lazy(QRR_BnB_MC):
-    _: KW_ONLY
-    solve_every : float = 0.1 # every percentage of depth
 
-    def __post_init__(self):
-        super().__post_init__()
-        self._cached_best_info = {
-            'z': None
-        }
-        self._cached_best_z = None
-        self._cached_X = ...
-    
-    
-    def solve_subproblem(self, sub_uf, index_map, **kwargs):
-        solve_flag = (self.n_depth % (sub_uf.n_var * self.solve_every) == 0)
-        solve_flag = solve_flag or (self._cached_best_z is None)
+@dataclass
+class QRR_BnB_MC_V3(QRR_BnB_MC_V2):
+    def get_bound(self, sub_uf, problem, compensation, laplacian, **other_info):
+        # Check if this is the root problem (no variables fixed yet)
+        solver_info = None # change according to cases
+        
+        if self.qrr_info is not None and sub_uf.is_root:
+            # If we have pre-computed QRR information for the root problem, use it
+            z, X, solver_info = self.qrr_info
             
-        if solve_flag:
-            z_sub, X = self._solve_subproblem(sub_uf, **kwargs)
-            z = sub_uf.get_original_solution(z_sub)
-            cut = self.cache_root_problem.evaluate_solution(z)
-            if self._cached_best_info['cut'] is None or cut > self._cached_best_info['cut']:
-                self._cached_best_info = {
-                    'z': z,
-                    'X': X,
-                    'cut': cut,
-                    'index_map': index_map
-                }
-            return z_sub, {}
+        # the problem has been brute-forcely solved.
+        elif problem.ref_solution_arr is not None:
+            z = problem.ref_solution_arr
+            X = None
+            
         else:
-            return self._cached_best_z, {}
+            # Otherwise, solve the subproblem with QRR
+            kept_idx = sub_uf.index_map
+            L = laplacian[kept_idx, :][:, kept_idx]
+            z_sub, X, solver_info = qrr_on_laplacian(L, approx_style=self.approx_style, return_info=True)
+                
+            # Convert the reduced solution to the original solution
+            # z_sub_r = info['max_relaxed_solution']
+            # cut_sub_r = problem.evaluate_solution(z_sub_r, relaxed=True)
+            z = sub_uf.get_original_solution(z_sub)
+            sub_cut = solver_info['best_cut']
+            
+        cut = self.cache_root_problem.evaluate_solution(z)
+        # if solver_info:
+        #     bound = sub_cut/0.88 + compensation
+        # else: 
+        bound = cut / 0.88
+        bound_info = {
+            'X': X, 
+            'z': z,
+            'cut': cut
+        }
+        
+        return bound, bound_info
+     
+    
+    
+# @dataclass
+# class QRR_BnB_MC_Lazy(QRR_BnB_MC):
+#     _: KW_ONLY
+#     solve_every : float = 0.1 # every percentage of depth
+
+#     def __post_init__(self):
+#         super().__post_init__()
+#         self._cached_best_info = {
+#             'z': None
+#         }
+#         self._cached_best_z = None
+#         self._cached_X = ...
+    
+    
+#     def solve_subproblem(self, sub_uf, index_map, **kwargs):
+#         solve_flag = (self.n_depth % (sub_uf.n_var * self.solve_every) == 0)
+#         solve_flag = solve_flag or (self._cached_best_z is None)
+            
+#         if solve_flag:
+#             z_sub, X = self._solve_subproblem(sub_uf, **kwargs)
+#             z = sub_uf.get_original_solution(z_sub)
+#             cut = self.cache_root_problem.evaluate_solution(z)
+#             if self._cached_best_info['cut'] is None or cut > self._cached_best_info['cut']:
+#                 self._cached_best_info = {
+#                     'z': z,
+#                     'X': X,
+#                     'cut': cut,
+#                     'index_map': index_map
+#                 }
+#             return z_sub, {}
+#         else:
+#             return self._cached_best_z, {}
             
         
-    def pick_branching_pair(self, X, sheduled_pairs, **kwargs):
-        """ 
-        when X is provided, calculate the next pairs and schedule them,
-        when scheduled pairs are exhausted, pick the next pair from the scheduled pairs
+#     def pick_branching_pair(self, X, sheduled_pairs, **kwargs):
+#         """ 
+#         when X is provided, calculate the next pairs and schedule them,
+#         when scheduled pairs are exhausted, pick the next pair from the scheduled pairs
         
-        QUESTIONS: HOW TO SCHEDULE THE GOOD PAIRS? 
-        """
-        pass
+#         QUESTIONS: HOW TO SCHEDULE THE GOOD PAIRS? 
+#         """
+#         pass
     
     
     
-    
+
     
 @dataclass
 class QRR_BnB_MC_Local_Improvement(QRR_BnB_MC):

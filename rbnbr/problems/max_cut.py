@@ -13,7 +13,6 @@ import warnings
 
 class MaxCutProblem(CombProblemBase):
     
-    
     @property
     def N(self):
         return self.graph.number_of_nodes()

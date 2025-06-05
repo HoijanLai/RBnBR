@@ -122,9 +122,9 @@ class QRRMaxCutSolver(QAOAMaxCutSolver):
         optim_params=None, 
         select_style='best', 
         approx_style='default',
-        return_max_eval=False,
         return_info=False,
         index_map=None,
+        
         **kwargs
         ):
         if index_map is None:
@@ -229,8 +229,10 @@ class QRRMaxCutSolver(QAOAMaxCutSolver):
         
         
         if return_info:
+            W = problem.adjacency_matrix
             return solution_tuple[0], solution_tuple[1], {
                 'max_eval': max_eval,
+                'relaxed_cut': 0.5*np.sum((np.ones_like(Z) - Z ) * W),
                 # 'max_relaxed_solution': best_relaxed_solution,
                 # 'max_relaxed_cost': best_relaxed_cost
             }
@@ -284,3 +286,114 @@ class QRRnGWMaxCutSolver(QRRMaxCutSolver, GWMaxCutSolver):
         return qrr_information
             
             
+        
+        
+from rbnbr.solver.quantum.exp_p1 import p1_expval_maxcut 
+from scipy.optimize import minimize
+            
+            
+def qrr_on_laplacian(laplacian, X_type='corr', select_style='best', topk=None, approx_style='default', return_info=False):
+    beta, gamma = qrr_optimize_params(laplacian)
+    Z = p1_Z_maxcut(laplacian, beta, gamma)
+        ## 2. COMPUTE THE EIGENVALUES AND EIGENVECTORS
+    evals, evecs = np.linalg.eigh(Z)
+    # print(np.sum(eigenvectors - eigenvectors.T))
+    evecs = evecs.T
+    sign_vecs = np.sign(evecs).astype(int)
+    bin_vecs = ((1 + np.sign(evecs)) // 2).astype(int) # 0 / 1 solution
+    
+    max_eval = np.max(evals)
+    
+## 3. SELECT THE BEST SOLUTION
+    # Evaluate all candidates and sort by cost
+    candidates = []
+    for i in range(sign_vecs.shape[0]):
+        sol = sign_vecs[i]
+        cost = 0.25 * sol.T@laplacian@sol
+        relaxed_cost = 0.25*evecs[i, :].T@laplacian@evecs[i, :]
+        candidates.append((cost, bin_vecs[i].tolist(), evecs[i, :], evals[i], i, relaxed_cost))
+        # candidates.append((cost, sol, evecs[i, :], np.abs(evals[i]), i))
+    
+    # Sort in descending order by cost
+    candidates.sort(reverse=True, key=lambda x: x[0])
+    # relaxed_candidates = sorted(candidates, key=lambda x: x[5], reverse=True)
+    # self.cache_info = {
+    #     'abs_rank': np.argsort(np.abs(evals)),
+    #     'quality_rank': [x[4] for x in candidates]
+    # }
+    
+    # Get the best solution and correlation matrix
+    best_solution = candidates[0][1]
+    # best_relaxed_solution = relaxed_candidates[0][3]
+    # best_relaxed_cost = relaxed_candidates[0][5]
+    solution_tuple = (None, None)
+    if X_type == 'corr':
+        solution_tuple = (best_solution, Z)
+    
+    elif X_type == 'relaxation':
+        
+        if topk is not None:
+            k = max(candidates[0][4], topk)
+        else:
+            k = candidates[0][4] 
+            
+        k += 1 # +1 because it will be used in slicing 
+
+        if approx_style == 'default':
+            # the candidates are sorted by the cost
+            # k is the eigen index of the best solution
+            # so the following select the top k solutions
+            # this is completely empirical 
+            # and this is NOT low-rank approximation
+            topk_items = candidates[:k]
+            topk_evs = np.array([x[2] for x in topk_items])
+            topk_evals = np.array([x[3] for x in topk_items])
+            X_k = topk_evs.T @ np.diag(topk_evals) @ topk_evs
+            
+        elif approx_style == 'low-rank':
+            # low-rank approximation
+            idx = np.argsort(evals)[::-1] 
+            evals = evals[idx][:k]                 # sorted eigenvalues
+            evecs = evecs[:, idx][:, :k]
+            X_k = evecs @ np.diag(evals) @ evecs.T
+        
+        else:
+            raise ValueError(f"Invalid approx_style: {approx_style}")
+        
+        solution_tuple = (best_solution, X_k)
+    
+    else: # other X_type 
+        raise ValueError(f"Invalid X_type: {X_type}")
+
+        
+    if return_info:
+        W = -laplacian
+        np.fill_diagonal(W, 0)
+        return solution_tuple[0], solution_tuple[1], {
+            'max_eval': max_eval,
+            'relaxed_cut': 0.5*np.sum((np.ones_like(Z) - Z) * W),
+            'best_cut': candidates[0][0]
+            # 'max_relaxed_solution': best_relaxed_solution,
+            # 'max_relaxed_cost': best_relaxed_cost
+        }
+    else:
+        return solution_tuple
+    
+    
+    
+def qrr_optimize_params(graph, maxiter=100, tol=0.01):
+    init_params = [np.pi, np.pi / 2]
+    def p1_cost_func_closure(params, graph):
+        cost = p1_expval_maxcut(graph, params[0], params[1])
+        return cost
+    
+    result = minimize(
+        p1_cost_func_closure,
+        init_params,
+        args=(graph,),
+        method="COBYLA",
+        tol=tol,
+        options={'maxiter': maxiter}
+    )
+    
+    return result.x
