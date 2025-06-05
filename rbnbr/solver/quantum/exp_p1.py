@@ -35,13 +35,23 @@ def compute_Cij(J_ij: float, h_i: float, h_j: float, J_ik: np.ndarray, J_jk: np.
 
 
 
-def p1_Z_maxcut(graph, beta, gamma):
-    n_nodes = len(graph.nodes)
-    Z = np.zeros((n_nodes, n_nodes))
-    # Convert graph to adjacency matrix using NetworkX's built-in function
+def p1_Z_maxcut(graph, beta, gamma): 
+    """
+    not compatible with the graph with negative edges
+    """
+    if isinstance(graph, nx.Graph):
+        n_nodes = len(graph.nodes)
+        # Convert graph to adjacency matrix using NetworkX's built-in function
 
-    J = nx.to_numpy_array(graph)
-    uw_J = np.where(J > 0, 1, 0)  # Create unweighted adjacency matrix
+        J = nx.to_numpy_array(graph)
+     
+    else: # graph is a laplacian
+        n_nodes = graph.shape[0]
+        J = graph
+        
+    Z = np.zeros((n_nodes, n_nodes))
+        
+    uw_J = np.where(J > 0, 1, 0)  # Create unweighted adjacency matrix 
     
     # For MaxCut, all h_i are 0
     h = np.zeros(n_nodes)
@@ -57,7 +67,7 @@ def p1_Z_maxcut(graph, beta, gamma):
                 uw_J_ik = uw_J_ii_jj[0, :]
                 uw_J_jk = uw_J_ii_jj[1, :]
                 
-                z_ij =compute_Cij(J[i, j], 0.0, 0.0, uw_J_ik, uw_J_jk, beta, gamma)
+                z_ij = compute_Cij(J[i, j], 0.0, 0.0, uw_J_ik, uw_J_jk, beta, gamma)
                 Z[i, j] = z_ij
                 Z[j, i] = z_ij
     
@@ -66,10 +76,13 @@ def p1_Z_maxcut(graph, beta, gamma):
 
 
 def p1_expval_maxcut(graph, beta, gamma):
-    w = nx.to_numpy_array(graph)
+    if isinstance(graph, nx.Graph):
+        w = nx.to_numpy_array(graph)
+    else: # graph is a laplacian
+        w = -graph
+        np.fill_diagonal(w, 0)
     Z = p1_Z_maxcut(graph, beta, gamma)
-    return np.sum(Z * np.triu(w))
+    return np.sum(Z * w) # Ising energy
     
     
 
-    

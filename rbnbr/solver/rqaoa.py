@@ -23,7 +23,8 @@ from rbnbr.solver.solution import Solution
 
 
 class RQAOAMaxCutSolver(ApproximationSolver):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, brute_force_threshold=10, *args, **kwargs):
+        self.brute_force_threshold = brute_force_threshold
         super().__init__(*args, **kwargs)
         
     def solve(self, problem: MaxCutProblem, *args, **kwargs):
@@ -37,7 +38,7 @@ class RQAOAMaxCutSolver(ApproximationSolver):
         bits, cut, times = get_rqaoa_result(
             edges=edges,
             edge_weights=edge_weights,
-            brute_force_threshold=10,
+            brute_force_threshold=self.brute_force_threshold,
             edge_noise=0.0,
             nb_div=5,
             div_level=3,

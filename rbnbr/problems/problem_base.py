@@ -38,12 +38,12 @@ class CombProblemBase:
         df = df.sort_values('Cut Value', ascending=False)
         return df
     
-    def __init__(self, graph, problem_type: str):
+    def __init__(self, graph, problem_type: str, name: str=''):
         self.problem_type = problem_type
         
         self._graph = copy.deepcopy(graph)
         self._metadata = {
-            'name': graph.name,
+            'name': name,
         }
         
         self.vis_pos = nx.spring_layout(graph)
@@ -115,9 +115,11 @@ class ProblemSet:
             performance = problem.solutions(method_name).data
             performance['problem_name'] = problem.name
             data.append(performance)
-        return pd.DataFrame(data)[['problem_name', 'cost', 'approx_ratio']]
+        return pd.DataFrame(data)[['problem_name', 'cost', 'approx_ratio', 'n_steps']]
 
-        
+    def method_names(self):
+        return list(self._problems[0]._solutions.keys())
+
 
     def save_problems(self, file_path: str):
         with open(file_path, 'wb') as f:
