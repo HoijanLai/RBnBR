@@ -1,1 +1,1 @@
-## please don't read me now
+## Quantum Relaxation Informed Branch and Bound Algorithm
